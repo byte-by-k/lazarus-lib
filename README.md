@@ -168,7 +168,7 @@ public void process(String id, @LazarusPayload MyEvent event) { ... }
 
 ---
 
-## Healer DB Schema
+## Lazarus DB Schema
 
 ```sql
 CREATE TABLE lazarus_events (
