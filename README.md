@@ -22,9 +22,9 @@ This means:
 
 ---
 
-## What `@Heal` Does Differently
+## What `@Rise` Does Differently
 
-| Feature | Spring `@Retryable` | `@Heal` |
+| Feature | Spring `@Retryable` | `@Rise` |
 |---|---|---|
 | Retry on exception | ✅ | ✅ |
 | Configurable backoff | ✅ | ✅ |
@@ -49,11 +49,11 @@ This means:
 </dependency>
 ```
 
-### 2. Enable the Healer
+### 2. Enable Lazarus
 
 ```java
 @SpringBootApplication
-@EnableExceptionHealer
+@EnableLazarus
 public class MyApplication { }
 ```
 
@@ -63,14 +63,14 @@ public class MyApplication { }
 @Service
 public class OrderService {
 
-    @Heal(
-        retryOn   = { TransientDataException.class, TimeoutException.class },
-        backoff   = @HealBackoff(initialDelay = 500, multiplier = 2, maxDelay = 8000),
-        retryLimit = 3,
+    @Rise(
+        retryOn      = { TransientDataException.class, TimeoutException.class },
+        backoff      = @RiseBackoff(initialDelay = 500, multiplier = 2, maxDelay = 8000),
+        retryLimit   = 3,
         reprocessVia = ReprocessingStrategy.KAFKA,
-        topic     = "healer.reprocess.orders"
+        topic        = "lazarus.reprocess.orders"
     )
-    public void processOrder(@HealPayload OrderRequest order) {
+    public void processOrder(@RisePayload OrderRequest order) {
         // Your business logic — just write the happy path
         orderRepository.save(order.toEntity());
         paymentGateway.charge(order.getPaymentDetails());
@@ -82,37 +82,37 @@ public class OrderService {
 
 ## Core Annotations
 
-### `@Heal`
+### `@Rise`
 
-Placed on any Spring-managed bean method. Activates the Healer interceptor for that method.
+Placed on any Spring-managed bean method. Activates the Lazarus interceptor for that method.
 
 | Attribute | Type | Description |
 |---|---|---|
 | `retryOn` | `Class<? extends Throwable>[]` | Exceptions that trigger healing |
 | `retryLimit` | `int` | Max in-process retry attempts before persisting (default: 3) |
-| `backoff` | `@HealBackoff` | Backoff policy for in-process retries |
+| `backoff` | `@RiseBackoff` | Backoff policy for in-process retries |
 | `reprocessVia` | `ReprocessingStrategy` | `KAFKA`, `LAMBDA`, `REST` |
 | `topic` | `String` | Kafka topic (if `KAFKA`) |
 | `lambdaArn` | `String` | AWS Lambda ARN (if `LAMBDA`) |
 | `endpoint` | `String` | REST URL (if `REST`) |
-| `persistent` | `boolean` | Whether to persist to the Healer DB (default: `true`) |
+| `persistent` | `boolean` | Whether to persist to the DB (default: `true`) |
 
-### `@HealPayload`
+### `@RisePayload`
 
-Marks the single method parameter as the payload to capture on failure. The parameter is serialized to JSON and stored in the `healer_events` table.
+Marks the single method parameter to capture on failure. Serialized to JSON and stored in `lazarus_events`.
 
 ```java
 // ✅ Correct — one parameter, annotated
-public void handleEvent(@HealPayload MyEvent event) { ... }
+public void handleEvent(@RisePayload MyEvent event) { ... }
 
-// ❌ Won't compile — @Heal methods must have exactly one @HealPayload param
-public void process(String id, @HealPayload MyEvent event) { ... }
+// ❌ Won't compile — @Rise methods must have exactly one @RisePayload param
+public void process(String id, @RisePayload MyEvent event) { ... }
 ```
 
-### `@HealBackoff`
+### `@RiseBackoff`
 
 ```java
-@HealBackoff(
+@RiseBackoff(
     initialDelay = 1000,   // ms before first retry
     multiplier   = 2.0,    // exponential multiplier
     maxDelay     = 30000,  // cap at 30s
@@ -129,24 +129,20 @@ public void process(String id, @HealPayload MyEvent event) { ... }
   │                    Your Spring App                       │
   │                                                          │
   │   @Service                                               │
-  │   processOrder(@HealPayload OrderRequest)                │
+  │   processOrder(@RisePayload OrderRequest)                │
   │           │                                              │
   │           ▼                                              │
-  │   ┌──────────────────┐                                   │
-  │   │  HealerInterceptor│  (AOP Around Advice)             │
-  │   │  - catches target │                                   │
-  │   │    exceptions     │                                   │
-  │   │  - runs backoff   │                                   │
-  │   │    retry loop     │                                   │
-  │   └────────┬─────────┘                                   │
+  │   ┌──────────────────────┐                               │
+  │   │  LazarusInterceptor  │  (AOP Around Advice)          │
+  │   │  - catches exceptions│                               │
+  │   │  - runs backoff loop │                               │
+  │   └────────┬─────────────┘                               │
   │            │ all retries exhausted                        │
   │            ▼                                              │
-  │   ┌──────────────────┐                                   │
-  │   │  HealerEventStore│  (persists to DB)                 │
-  │   │  healer_events   │──────────────────────────────┐    │
-  │   │  table           │                              │    │
-  │   └────────┬─────────┘                              │    │
-  │            │                                        │    │
+  │   ┌──────────────────────┐                               │
+  │   │  LazarusEventStore   │  (persists to DB)             │
+  │   │  lazarus_events      │──────────────────────────┐    │
+  │   └────────┬─────────────┘                          │    │
   │            ▼                                        │    │
   │   ┌──────────────────────────────┐                  │    │
   │   │     ReprocessingRouter       │                  │    │
@@ -156,53 +152,49 @@ public void process(String id, @HealPayload MyEvent event) { ... }
   │   └──────────────────────────────┘                  │    │
   └─────────────────────────────────────────────────────┘    │
                                                              │
-  ┌──────────────────────────────────────────────────────────┘
-  │
-  │   healer_events table (PostgreSQL / any JPA datasource)
-  │   ┌──────────┬─────────────┬──────────┬──────────────────────┐
-  │   │ event_id │ method_name │ status   │ payload_json         │
-  │   ├──────────┼─────────────┼──────────┼──────────────────────┤
-  │   │ uuid-1   │ processOrder│ PENDING  │ {"orderId":"A1",...} │
-  │   │ uuid-2   │ handleInv.. │ RESOLVED │ {"itemId":"B9",...}  │
-  │   └──────────┴─────────────┴──────────┴──────────────────────┘
+  lazarus_events (PostgreSQL / any JPA datasource)           │
+  ┌──────────┬─────────────┬──────────┬──────────────────────┘
+  │ event_id │ method_name │ status   │ payload_json
+  ├──────────┼─────────────┼──────────┼──────────────────────
+  │ uuid-1   │ processOrder│ PENDING  │ {"orderId":"A1",...}
+  │ uuid-2   │ handleInv.. │ RESOLVED │ {"itemId":"B9",...}
+  └──────────┴─────────────┴──────────┴──────────────────────
 ```
 
 ---
 
-## Healer DB Schema
+## DB Schema
 
 ```sql
-CREATE TABLE healer_events (
-    event_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    method_name     VARCHAR(255) NOT NULL,
-    class_name      VARCHAR(255) NOT NULL,
-    exception_type  VARCHAR(255) NOT NULL,
-    exception_msg   TEXT,
-    payload_json    JSONB NOT NULL,
-    reprocess_via   VARCHAR(50),
+CREATE TABLE lazarus_events (
+    event_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    method_name      VARCHAR(255) NOT NULL,
+    class_name       VARCHAR(255) NOT NULL,
+    exception_type   VARCHAR(255) NOT NULL,
+    exception_msg    TEXT,
+    payload_json     JSONB NOT NULL,
+    reprocess_via    VARCHAR(50),
     reprocess_target VARCHAR(500),
-    status          VARCHAR(50) DEFAULT 'PENDING',
-    retry_count     INT DEFAULT 0,
-    created_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now(),
-    resolved_at     TIMESTAMPTZ
+    status           VARCHAR(50) DEFAULT 'PENDING',
+    retry_count      INT DEFAULT 0,
+    created_at       TIMESTAMPTZ DEFAULT now(),
+    updated_at       TIMESTAMPTZ DEFAULT now(),
+    resolved_at      TIMESTAMPTZ
 );
 
-CREATE INDEX idx_healer_status   ON healer_events(status);
-CREATE INDEX idx_healer_method   ON healer_events(method_name);
-CREATE INDEX idx_healer_created  ON healer_events(created_at DESC);
+CREATE INDEX idx_lazarus_status  ON lazarus_events(status);
+CREATE INDEX idx_lazarus_method  ON lazarus_events(method_name);
+CREATE INDEX idx_lazarus_created ON lazarus_events(created_at DESC);
 ```
 
 ---
 
 ## Reprocessing Strategies
 
-### Kafka (recommended for high-throughput)
-
-The Healer serializes the `@HealPayload` back to its original JSON and publishes it to the configured topic.
+### Kafka
 
 ```yaml
-healer:
+lazarus:
   kafka:
     bootstrap-servers: localhost:9092
     producer-config:
@@ -212,10 +204,8 @@ healer:
 
 ### AWS Lambda
 
-Invokes the configured Lambda ARN with the payload as the event body.
-
 ```java
-@Heal(
+@Rise(
     retryOn      = { RemoteCallException.class },
     reprocessVia = ReprocessingStrategy.LAMBDA,
     lambdaArn    = "arn:aws:lambda:us-east-1:123456789012:function:reprocess-orders"
@@ -224,13 +214,11 @@ Invokes the configured Lambda ARN with the payload as the event body.
 
 ### REST Endpoint
 
-POSTs the serialized payload to any HTTP endpoint.
-
 ```java
-@Heal(
+@Rise(
     retryOn      = { ServiceUnavailableException.class },
     reprocessVia = ReprocessingStrategy.REST,
-    endpoint     = "${healer.reprocess.order-endpoint}"
+    endpoint     = "${lazarus.reprocess.order-endpoint}"
 )
 ```
 
@@ -239,10 +227,8 @@ POSTs the serialized payload to any HTTP endpoint.
 ## Configuration Reference
 
 ```yaml
-healer:
+lazarus:
   enabled: true
-  datasource:
-    # Uses your Spring Boot datasource by default
   kafka:
     bootstrap-servers: localhost:9092
   lambda:
@@ -258,10 +244,10 @@ healer:
 
 ## Roadmap
 
-- [ ] `v1.0` — Core `@Heal` interceptor, DB persistence, Kafka reprocessing
+- [ ] `v1.0` — Core `@Rise` interceptor, DB persistence, Kafka reprocessing
 - [ ] `v1.1` — Lambda + REST reprocessing strategies
 - [ ] `v1.2` — Background polling scheduler
-- [ ] `v1.3` — `@HealListener` — declare reprocessing consumers inline
+- [ ] `v1.3` — `@RiseListener` — declare reprocessing consumers inline
 - [ ] `v2.0` — `lazarus-mcp` integration — AI agent can query, triage, and resolve events
 - [ ] `v2.1` — Dashboard UI (Spring Boot Actuator endpoint + simple HTML view)
 - [ ] `v2.2` — Multi-tenancy support
@@ -270,8 +256,8 @@ healer:
 
 ## Related Projects
 
-- **[lazarus-mcp](https://github.com/byte-by-k/lazarus-mcp)** — MCP Server exposing the Healer DB to AI agents
-- **[mcp-agent-java](https://github.com/byte-by-k/mcp-agent-java)** — Java AI agent that uses lazarus-mcp
+- **[lazarus-mcp](https://github.com/byte-by-k/lazarus-mcp)** — MCP Server exposing the DB to AI agents
+- **[mcp-agent-java](https://github.com/byte-by-k/mcp-agent-java)** — Java AI agent using lazarus-mcp
 - **[mcp-agent-python](https://github.com/byte-by-k/mcp-agent-python)** — Python AI agent with MCP support
 
 ---
